@@ -176,6 +176,35 @@ def layout_runoff_tab():
             dcc.Graph(id='runoff-plot', figure=create_empty_figure(), style={'height': '450px'}),
             html.Div(id='runoff-summary', className="mt-2",
                      style={'backgroundColor': '#f8f9fa', 'padding': '10px', 'borderRadius': '5px'}),
+            html.Hr(),
+            html.Label("参数敏感性分析", className="fw-bold"),
+            dbc.Row([
+                dbc.Col([
+                    html.Label("选择分析参数"),
+                    dcc.Dropdown(id='sensitivity-param-select', placeholder="选择要分析的参数..."),
+                ], md=4),
+                dbc.Col([
+                    html.Label("汇流方法"),
+                    dcc.Dropdown(id='sensitivity-routing-method',
+                                 options=[
+                                     {'label': 'Nash瞬时单位线', 'value': 'Nash'},
+                                     {'label': 'Muskingum河道演算', 'value': 'Muskingum'},
+                                 ], value='Nash'),
+                ], md=4),
+                dbc.Col([
+                    html.Label("采样数量"),
+                    dbc.Input(id='sensitivity-n-samples', type='number', value=10, min=5, max=20, step=1),
+                ], md=4),
+            ], className="mb-3"),
+            dbc.Button("运行参数敏感性分析", id="btn-run-sensitivity",
+                       color="info", className="mb-3"),
+            dcc.Loading(id="sensitivity-loading", type="default", children=[
+                html.Label("敏感性分析结果 - 流量过程线叠加图", className="fw-bold"),
+                dcc.Graph(id='sensitivity-plot', figure=create_empty_figure(),
+                          style={'height': '500px'}),
+                html.Label("各参数取值对应的评价指标", className="fw-bold mt-2"),
+                html.Div(id='sensitivity-table', className="mb-3"),
+            ]),
         ])
     ], className="mb-4")
 
@@ -272,6 +301,35 @@ def layout_calibration_tab():
                           figure=create_empty_figure("最优模拟与实测对比"),
                           style={'height': '400px'}),
             ]),
+            html.Hr(),
+            html.Label("参数不确定性分析", className="fw-bold"),
+            dbc.Row([
+                dbc.Col([
+                    html.Label("蒙特卡洛采样次数"),
+                    dbc.Input(id='uncertainty-n-samples', type='number',
+                              value=200, min=100, max=1000, step=50),
+                ], md=4),
+                dbc.Col([
+                    html.Label("扰动幅度 (%)"),
+                    dbc.Input(id='uncertainty-perturbation', type='number',
+                              value=10, min=5, max=30, step=1),
+                ], md=4),
+                dbc.Col([
+                    html.Label("置信水平 (%)"),
+                    dbc.Input(id='uncertainty-confidence', type='number',
+                              value=90, min=80, max=99, step=1),
+                ], md=4),
+            ], className="mb-3"),
+            dbc.Button("运行不确定性分析", id="btn-run-uncertainty",
+                       color="warning", className="mb-3"),
+            dcc.Loading(id="uncertainty-loading", type="default", children=[
+                html.Label("置信带包络图", className="fw-bold"),
+                dcc.Graph(id='uncertainty-plot',
+                          figure=create_empty_figure(),
+                          style={'height': '450px'}),
+                html.Label("参数敏感性排名 (按NSE变化幅度)", className="fw-bold mt-2"),
+                html.Div(id='uncertainty-sensitivity-rank', className="mb-3"),
+            ]),
         ])
     ], className="mb-4")
 
@@ -301,6 +359,22 @@ def layout_forecast_tab():
                     dbc.Input(id='init-Qg0', type='number', value=5.0, step=0.5),
                 ], md=3),
             ], className="mb-3"),
+            html.Label("多方案对比 - 选择产流模型 (2-3种，Ctrl/Shift多选)", className="fw-bold"),
+            dcc.Checklist(id='forecast-model-types',
+                          options=[
+                              {'label': '蓄满产流', 'value': '蓄满产流'},
+                              {'label': '超渗产流', 'value': '超渗产流'},
+                              {'label': '混合产流', 'value': '混合产流'},
+                          ],
+                          value=['蓄满产流'],
+                          labelStyle={'display': 'inline-block', 'marginRight': '30px'},
+                          className="mb-3"),
+            html.Label("汇流方法", className="fw-bold"),
+            dcc.Dropdown(id='forecast-routing-method',
+                         options=[
+                             {'label': 'Nash瞬时单位线', 'value': 'Nash'},
+                             {'label': 'Muskingum河道演算', 'value': 'Muskingum'},
+                         ], value='Nash', className="mb-3"),
             html.Label("实时校正设置 (可选 - 输入已观测流量，NaN表示未观测)", className="fw-bold"),
             dcc.Textarea(id='observed-q-input',
                          placeholder='输入实测流量(逗号分隔)，如: 5, 8, 15, NaN, NaN, NaN...',
@@ -317,8 +391,10 @@ def layout_forecast_tab():
             ], className="mb-3"),
             dbc.Button("运行洪水预报", id="btn-run-forecast", color="warning", className="mb-3"),
             html.Hr(),
-            html.Label("预报结果", className="fw-bold"),
+            html.Label("预报结果 (多方案对比)", className="fw-bold"),
             dcc.Graph(id='forecast-plot', figure=create_empty_figure(), style={'height': '500px'}),
+            html.Label("各方案预报结果对比表", className="fw-bold mt-2"),
+            html.Div(id='forecast-compare-table', className="mb-3"),
             html.Div(id='forecast-summary', className="mt-2",
                      style={'backgroundColor': '#fff3e0', 'padding': '15px', 'borderRadius': '5px'}),
         ])

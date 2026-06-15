@@ -16,6 +16,7 @@ from dash import dcc, html, dash_table, Input, Output, State, callback_context
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import plotly.express as px
 
 from hydrology.data_manager import DataManager
 from hydrology.runoff_models import get_runoff_model

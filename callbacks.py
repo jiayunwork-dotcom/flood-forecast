@@ -1251,3 +1251,585 @@ hr {{ border: 1px solid #e0e0e0; }}</style></head><body>
         report_str += "</body></html>"
 
         return html_report, dcc.send_string(report_str, f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html")
+
+    # ============================================================
+    # 参数敏感性分析回调
+    # ============================================================
+
+    @app.callback(
+        Output('sensitivity-param-select', 'options'),
+        [Input('runoff-model-type', 'value')]
+    )
+    def update_sensitivity_param_options(model_type):
+        config = ModelCalibrator.get_default_param_config(model_type, 'Nash')
+        param_labels = {
+            'WM': 'WM 最大蓄水容量',
+            'WUM': 'WUM 上层蓄水容量',
+            'WLM': 'WLM 下层蓄水容量',
+            'B': 'B 蓄水容量分布指数',
+            'K_ET': 'K 蒸散发折算系数',
+            'C': 'C 深层蒸散发系数',
+            'Ks': 'Ks 饱和导水率',
+            'Sf': 'Sf 湿润锋吸力',
+            'theta_i': 'θi 初始含水率',
+            'theta_s': 'θs 饱和含水率',
+            'sat_ratio': '饱和区域比例',
+            'n': 'n 水库个数(Nash)',
+            'K_uh': 'K 调蓄系数(Nash)',
+            'Kg': 'Kg 地下水退水常数',
+        }
+        options = []
+        for name in config['names']:
+            label = param_labels.get(name, name)
+            options.append({'label': f'{label} ({name})', 'value': name})
+        return options
+
+    @app.callback(
+        [Output('sensitivity-plot', 'figure'),
+         Output('sensitivity-table', 'children')],
+        [Input('btn-run-sensitivity', 'n_clicks')],
+        [State('runoff-model-type', 'value'),
+         State('runoff-event-selector', 'value'),
+         State('sensitivity-param-select', 'value'),
+         State('sensitivity-routing-method', 'value'),
+         State('sensitivity-n-samples', 'value'),
+         State('param-WM', 'value'),
+         State('param-WUM', 'value'),
+         State('param-WLM', 'value'),
+         State('param-B', 'value'),
+         State('param-K_ET', 'value'),
+         State('param-C', 'value'),
+         State('param-Ks', 'value'),
+         State('param-Sf', 'value'),
+         State('param-theta_i', 'value'),
+         State('param-theta_s', 'value'),
+         State('param-sat_ratio', 'value')],
+        prevent_initial_call=True
+    )
+    def run_sensitivity_analysis(n_clicks, model_type, event_id, target_param, routing_method, n_samples,
+                                 WM, WUM, WLM, B, K_ET, C, Ks, Sf, theta_i, theta_s, sat_ratio):
+        if n_clicks is None or event_id is None or event_id == -1 or target_param is None:
+            return create_empty_figure("请选择参数和场次后运行分析"), "请先选择要分析的参数和场次洪水"
+
+        event_df = data_mgr.get_event_data(event_id)
+        if event_df is None:
+            return create_empty_figure(), "未找到场次数据"
+
+        rainfall = event_df['rainfall'].fillna(0).values
+        evaporation = event_df['evaporation'].fillna(0).values if 'evaporation' in event_df.columns else None
+        Q_obs = event_df['runoff'].values if 'runoff' in event_df.columns else None
+
+        dt_hours = data_mgr.time_delta.total_seconds() / 3600 if data_mgr.time_delta else 24
+        area = data_mgr.basin_params['area'] or 1.0
+
+        config = ModelCalibrator.get_default_param_config(model_type, routing_method)
+        bounds = dict(zip(config['names'], config['bounds']))
+        defaults = config['defaults']
+
+        base_params = dict(defaults)
+        param_inputs = {
+            'WM': WM, 'WUM': WUM, 'WLM': WLM, 'B': B, 'K_ET': K_ET, 'K': K_ET, 'C': C,
+            'Ks': Ks, 'Sf': Sf, 'theta_i': theta_i, 'theta_s': theta_s, 'sat_ratio': sat_ratio
+        }
+        for k, v in param_inputs.items():
+            if v is not None and k in base_params:
+                base_params[k] = float(v)
+
+        if target_param not in bounds:
+            return create_empty_figure(), f"参数 {target_param} 不在率定范围内"
+
+        lo, hi = bounds[target_param]
+        n_samples = max(int(n_samples), 5)
+        param_values = np.linspace(lo, hi, n_samples)
+
+        colors = px.colors.qualitative.Plotly if hasattr(px, 'colors') else [
+            '#636EFA', '#EF553B', '#00CC96', '#AB63FA', '#FFA15A',
+            '#19D3F3', '#FF6692', '#B6E880', '#FF97FF', '#FECB52'
+        ]
+        while len(colors) < len(param_values):
+            colors += colors
+
+        runoff_model = get_runoff_model(model_type, dt_hours, area)
+        routing_model = RoutingModel(dt_hours, area)
+
+        results = []
+        for i, pval in enumerate(param_values):
+            params = dict(base_params)
+            params[target_param] = float(pval)
+            try:
+                runoff_result = runoff_model.run(rainfall, evaporation, **params)
+                routing_result = routing_model.run(
+                    runoff_result['runoff_surface'],
+                    runoff_result['runoff_underground'],
+                    routing_method,
+                    **params
+                )
+                Q_cal = routing_result['Q_total']
+                metrics = {}
+                if Q_obs is not None and not np.isnan(Q_obs).all():
+                    metrics = calculate_metrics(Q_obs, Q_cal)
+                peak_idx = int(np.argmax(Q_cal))
+                peak_flow = float(Q_cal[peak_idx])
+                peak_time_idx = peak_idx
+                results.append({
+                    'param_value': float(pval),
+                    'Q_cal': Q_cal,
+                    'NSE': metrics.get('NSE', np.nan),
+                    'peak_flow': peak_flow,
+                    'peak_time_idx': peak_time_idx,
+                    'color': colors[i % len(colors)]
+                })
+            except Exception as e:
+                results.append({
+                    'param_value': float(pval),
+                    'Q_cal': None,
+                    'NSE': np.nan,
+                    'peak_flow': np.nan,
+                    'peak_time_idx': np.nan,
+                    'color': colors[i % len(colors)],
+                    'error': str(e)
+                })
+
+        fig = go.Figure()
+        x = list(range(len(rainfall)))
+        if Q_obs is not None and not np.isnan(Q_obs).all():
+            fig.add_trace(go.Scatter(x=x, y=Q_obs, mode='lines',
+                                     name='实测流量',
+                                     line=dict(color='#212121', width=3, dash='dash')))
+
+        for r in results:
+            if r['Q_cal'] is not None:
+                fig.add_trace(go.Scatter(
+                    x=x, y=r['Q_cal'], mode='lines',
+                    name=f"{target_param}={r['param_value']:.3f}",
+                    line=dict(color=r['color'], width=2)
+                ))
+
+        fig.update_layout(
+            title=f"参数敏感性分析 - {target_param} 变化对流量过程的影响",
+            xaxis_title='时段',
+            yaxis_title='流量 (m³/s)',
+            height=500,
+            template='plotly_white',
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+
+        rows_data = []
+        for r in results:
+            nse_str = f"{r['NSE']:.4f}" if not np.isnan(r['NSE']) else "N/A"
+            peak_str = f"{r['peak_flow']:.2f}" if not np.isnan(r['peak_flow']) else "N/A"
+            time_str = f"第{r['peak_time_idx']}时段" if not np.isnan(r['peak_time_idx']) else "N/A"
+            rows_data.append({
+                f'{target_param}取值': f"{r['param_value']:.4f}",
+                'NSE': nse_str,
+                '洪峰流量(m³/s)': peak_str,
+                '洪峰时间': time_str
+            })
+
+        table = dash_table.DataTable(
+            data=rows_data,
+            columns=[{'name': c, 'id': c} for c in rows_data[0].keys()] if rows_data else [],
+            style_table={'overflowX': 'auto'},
+            style_header={'backgroundColor': '#e3f2fd', 'fontWeight': 'bold'},
+            style_cell={'textAlign': 'center', 'padding': '8px'},
+        )
+
+        return fig, table
+
+    # ============================================================
+    # 参数不确定性分析回调
+    # ============================================================
+
+    @app.callback(
+        [Output('uncertainty-plot', 'figure'),
+         Output('uncertainty-sensitivity-rank', 'children')],
+        [Input('btn-run-uncertainty', 'n_clicks')],
+        [State('uncertainty-n-samples', 'value'),
+         State('uncertainty-perturbation', 'value'),
+         State('uncertainty-confidence', 'value')],
+        prevent_initial_call=True
+    )
+    def run_uncertainty_analysis(n_clicks, n_samples, perturbation_pct, confidence_pct):
+        global calibration_result
+        if n_clicks is None:
+            return create_empty_figure("请先完成参数率定再运行分析"), "请先率定参数"
+
+        if calibration_result is None:
+            return create_empty_figure("请先完成参数率定再运行分析"), "请先率定参数"
+
+        best_params = calibration_result['best_params']
+        runoff_type = calibration_result['runoff_model']
+        routing_method = calibration_result['routing_method']
+        param_names = calibration_result['param_names']
+        param_bounds = dict(zip(param_names, calibration_result['param_bounds']))
+
+        event_results = calibration_result['event_results']
+        if not event_results:
+            return create_empty_figure("率定结果中无数值场次"), "无数值场次"
+
+        dt_hours = data_mgr.time_delta.total_seconds() / 3600 if data_mgr.time_delta else 24
+        area = data_mgr.basin_params['area'] or 1.0
+
+        n_samples = max(int(n_samples), 100)
+        perturbation = float(perturbation_pct) / 100.0
+        confidence = float(confidence_pct) / 100.0
+        alpha_low = (1.0 - confidence) / 2.0
+        alpha_high = 1.0 - alpha_low
+
+        runoff_model = get_runoff_model(runoff_type, dt_hours, area)
+        routing_model = RoutingModel(dt_hours, area)
+
+        first_event = event_results[0]
+        dates = first_event.get('dates')
+        n_steps = len(first_event['Q_cal'])
+        Q_obs = first_event.get('Q_obs')
+
+        event_df_list = []
+        if data_mgr.flood_events:
+            for ev in data_mgr.flood_events:
+                ev_df = data_mgr.get_event_data(ev['id'])
+                if ev_df is not None and len(ev_df) == n_steps:
+                    event_df_list.append(ev_df)
+                    if len(event_df_list) >= len(event_results):
+                        break
+
+        if not event_df_list and data_mgr.flood_events:
+            for ev in data_mgr.flood_events:
+                ev_df = data_mgr.get_event_data(ev['id'])
+                if ev_df is not None:
+                    event_df_list.append(ev_df)
+                    break
+
+        if not event_df_list:
+            return create_empty_figure(), "无法获取场次数据，请先分割场次洪水"
+
+        all_Q_simulations = []
+        all_NSEs = []
+        param_NSE_changes = {name: [] for name in param_names}
+
+        rng = np.random.RandomState(42)
+        base_params = dict(best_params)
+        base_NSE = calibration_result['best_NSE']
+
+        for sample_idx in range(n_samples):
+            perturbed_params = dict(base_params)
+            for name in param_names:
+                val = base_params[name]
+                lo, hi = param_bounds.get(name, (val * 0.5, val * 1.5))
+                delta = val * perturbation * (2 * rng.random() - 1)
+                new_val = np.clip(val + delta, lo, hi)
+                perturbed_params[name] = float(new_val)
+
+            sample_nses = []
+            sample_qs = []
+            for ev_df in event_df_list:
+                rainfall = ev_df['rainfall'].fillna(0).values
+                evaporation = ev_df['evaporation'].fillna(0).values if 'evaporation' in ev_df.columns else None
+                Q_ev = ev_df['runoff'].values if 'runoff' in ev_df.columns else None
+                try:
+                    rr = runoff_model.run(rainfall, evaporation, **perturbed_params)
+                    rr_result = routing_model.run(
+                        rr['runoff_surface'], rr['runoff_underground'],
+                        routing_method, **perturbed_params
+                    )
+                    Q_cal = rr_result['Q_total']
+                    if len(sample_qs) == 0:
+                        sample_qs = Q_cal.tolist()
+                    if Q_ev is not None and not np.isnan(Q_ev).all():
+                        m = calculate_metrics(Q_ev, Q_cal)
+                        sample_nses.append(m['NSE'])
+                except Exception:
+                    pass
+
+            if sample_qs and len(sample_qs) == n_steps:
+                all_Q_simulations.append(sample_qs)
+
+            if sample_nses:
+                avg_nse = float(np.mean(sample_nses))
+                all_NSEs.append(avg_nse)
+                for name in param_names:
+                    delta_pct = (perturbed_params[name] - base_params[name]) / base_params[name] * 100.0 if base_params[name] != 0 else 0
+                    nse_change = (avg_nse - base_NSE) / max(abs(base_NSE), 1e-6) * 100.0
+                    param_NSE_changes[name].append({
+                        'param_delta_pct': delta_pct,
+                        'nse_change_pct': nse_change,
+                        'abs_nse_change': abs(nse_change)
+                    })
+
+        sensitivity_ranking = []
+        for name in param_names:
+            changes = param_NSE_changes[name]
+            if changes:
+                avg_abs_change = float(np.mean([c['abs_nse_change'] for c in changes]))
+                max_abs_change = float(np.max([c['abs_nse_change'] for c in changes]))
+                sensitivity_ranking.append({
+                    'param': name,
+                    'avg_abs_nse_change_pct': avg_abs_change,
+                    'max_abs_nse_change_pct': max_abs_change
+                })
+        sensitivity_ranking.sort(key=lambda x: x['avg_abs_nse_change_pct'], reverse=True)
+
+        fig = go.Figure()
+
+        if all_Q_simulations:
+            Q_array = np.array(all_Q_simulations)
+            Q_mean = np.mean(Q_array, axis=0)
+            Q_low = np.percentile(Q_array, alpha_low * 100, axis=0)
+            Q_high = np.percentile(Q_array, alpha_high * 100, axis=0)
+
+            x = list(range(n_steps))
+            x_dates = dates if dates else x
+
+            fig.add_trace(go.Scatter(
+                x=x_dates, y=Q_high, fill=None, mode='lines',
+                line=dict(color='rgba(158,158,158,0)'),
+                showlegend=False
+            ))
+            fig.add_trace(go.Scatter(
+                x=x_dates, y=Q_low, fill='tonexty', mode='lines',
+                line=dict(color='rgba(158,158,158,0)'),
+                name=f'{int(confidence_pct)}%置信区间',
+                fillcolor='rgba(158,158,158,0.4)'
+            ))
+
+            fig.add_trace(go.Scatter(
+                x=x_dates, y=Q_mean, mode='lines',
+                name='模拟均值',
+                line=dict(color='#1565c0', width=2.5)
+            ))
+
+            if Q_obs is not None and not np.isnan(Q_obs).all():
+                fig.add_trace(go.Scatter(
+                    x=x_dates, y=Q_obs, mode='lines',
+                    name='实测流量',
+                    line=dict(color='#c62828', width=2.5, dash='dash')
+                ))
+
+        fig.update_layout(
+            title=f"蒙特卡洛不确定性分析 (采样{n_samples}次, ±{perturbation_pct}%扰动)",
+            xaxis_title='时间/时段',
+            yaxis_title='流量 (m³/s)',
+            height=450,
+            template='plotly_white'
+        )
+
+        rank_content = [html.Strong("参数敏感性排名 (按NSE平均变化幅度从大到小):"), html.Br(), html.Br()]
+        for i, sr in enumerate(sensitivity_ranking):
+            rank_content += [
+                f"{i + 1}. {sr['param']}: ",
+                html.Strong(f"平均NSE变化 {sr['avg_abs_nse_change_pct']:.2f}%"),
+                f" (最大变化 {sr['max_abs_nse_change_pct']:.2f}%)",
+                html.Br()
+            ]
+
+        if not sensitivity_ranking:
+            rank_content.append("未计算到有效的敏感性数据")
+
+        rank_div = html.Div(rank_content, style={
+            'backgroundColor': '#fff8e1',
+            'padding': '15px',
+            'borderRadius': '5px'
+        })
+
+        return fig, rank_div
+
+    # ============================================================
+    # 洪水预报多方案对比回调
+    # ============================================================
+
+    @app.callback(
+        [Output('forecast-plot', 'figure'),
+         Output('forecast-summary', 'children'),
+         Output('forecast-compare-table', 'children')],
+        [Input('btn-run-forecast', 'n_clicks')],
+        [State('forecast-rain-input', 'value'),
+         State('warning-level', 'value'),
+         State('confidence-level', 'value'),
+         State('init-W0', 'value'),
+         State('init-Qg0', 'value'),
+         State('observed-q-input', 'value'),
+         State('corr-coeffs', 'value'),
+         State('corr-decay', 'value'),
+         State('forecast-model-types', 'value'),
+         State('forecast-routing-method', 'value')],
+        prevent_initial_call=True
+    )
+    def run_forecast_multi(n_clicks, rain_str, warning_level, confidence, W0, Qg0, obs_str, coeff_str, decay,
+                           model_types, routing_method):
+        try:
+            rainfall = np.array([float(x.strip()) for x in rain_str.replace('\n', ',').split(',') if x.strip()])
+        except Exception:
+            return create_empty_figure(), "降雨数据格式错误", ""
+
+        if len(rainfall) == 0:
+            return create_empty_figure(), "请输入降雨数据", ""
+
+        if not model_types:
+            return create_empty_figure(), "请至少选择一种产流模型", ""
+
+        if len(model_types) > 3:
+            model_types = model_types[:3]
+
+        dt_hours = data_mgr.time_delta.total_seconds() / 3600 if data_mgr.time_delta else 24
+        area = data_mgr.basin_params['area'] or 1.0
+
+        observed = None
+        if obs_str and obs_str.strip():
+            try:
+                observed = []
+                for s in obs_str.replace('\n', ',').split(','):
+                    s = s.strip()
+                    if s.lower() == 'nan' or s == '':
+                        observed.append(np.nan)
+                    else:
+                        observed.append(float(s))
+                observed = np.array(observed)
+            except Exception:
+                observed = None
+
+        coeffs = [0.5, 0.3, 0.2]
+        try:
+            coeffs = [float(x.strip()) for x in coeff_str.split(',') if x.strip()]
+        except Exception:
+            pass
+
+        line_styles = {
+            '蓄满产流': dict(dash='solid', width=3),
+            '超渗产流': dict(dash='dash', width=3),
+            '混合产流': dict(dash='dot', width=3),
+        }
+        color_map = {
+            '蓄满产流': '#1565c0',
+            '超渗产流': '#e65100',
+            '混合产流': '#2e7d32',
+        }
+
+        fig = go.Figure()
+        compare_rows = []
+        summary_content = []
+
+        all_forecast_results = {}
+
+        for mt in model_types:
+            params = {}
+            if calibration_result and calibration_result.get('runoff_model') == mt:
+                params = calibration_result['best_params'].copy()
+            else:
+                config = ModelCalibrator.get_default_param_config(mt, routing_method)
+                params = config['defaults']
+
+            params['WU0'] = W0 * 0.2 if W0 else params.get('WU0', 20.0)
+            params['WL0'] = W0 * 0.6 if W0 else params.get('WL0', 60.0)
+            params['WD0'] = W0 * 0.2 if W0 else params.get('WD0', 20.0)
+            params['baseflow'] = Qg0 if Qg0 else params.get('baseflow', 5.0)
+
+            forecaster = Forecaster(dt_hours, area)
+            forecaster.confidence_alpha = confidence / 100.0
+
+            result = forecaster.forecast(
+                rainfall,
+                initial_conditions={'WU0': params['WU0'], 'WL0': params['WL0'], 'WD0': params['WD0']},
+                model_params=params,
+                runoff_model_type=mt,
+                routing_method=routing_method
+            )
+
+            Q_raw = result['Q_forecast']
+            Q_corrected = None
+            if observed is not None and len(observed) > 0:
+                try:
+                    obs_arr = observed.copy()
+                    if len(obs_arr) < len(Q_raw):
+                        obs_arr = np.concatenate([obs_arr, np.full(len(Q_raw) - len(obs_arr), np.nan)])
+                    current_idx = int(np.sum(~np.isnan(obs_arr))) - 1 if obs_arr is not None else -1
+                    if current_idx >= 0:
+                        forecaster.set_correction_params(coeffs, decay)
+                        correction_result = forecaster.realtime_correction(Q_raw, obs_arr, current_idx, coeffs)
+                        Q_corrected = correction_result['Q_forecast_corrected']
+                except Exception:
+                    pass
+
+            Q_for_display = Q_corrected if Q_corrected is not None else Q_raw
+            all_forecast_results[mt] = {
+                'Q': Q_for_display,
+                'Q_raw': Q_raw,
+                'Q_corrected': Q_corrected,
+                'result': result
+            }
+
+            warning_info = forecaster.compare_with_warning_level(Q_for_display, warning_level or 0)
+            peak_idx = int(np.argmax(Q_for_display))
+            peak_flow = float(Q_for_display[peak_idx])
+            peak_time_hours = peak_idx * dt_hours
+
+            ls = line_styles.get(mt, dict(width=2))
+            color = color_map.get(mt, '#666666')
+
+            fig.add_trace(go.Scatter(
+                x=list(range(len(Q_for_display))), y=Q_for_display, mode='lines+markers',
+                name=f'{mt}预报流量',
+                line=dict(color=color, **ls),
+                marker=dict(size=5)
+            ))
+
+            compare_rows.append({
+                '模型类型': mt,
+                '预报洪峰(m³/s)': f"{peak_flow:.2f}",
+                '峰现时间': f"第{peak_idx}时段 ({peak_time_hours:.0f}h)",
+                '是否超警': '是 ✓' if warning_info['will_exceed'] else '否',
+                '首次超警时段': f"第{warning_info['first_exceed_idx']}时段" if warning_info['first_exceed_idx'] is not None else '-',
+            })
+
+        if warning_level:
+            fig.add_hline(y=warning_level, line_dash="dash", line_color="#ff6f00",
+                          annotation_text=f"警戒流量 {warning_level} m³/s")
+
+        if observed is not None:
+            obs_x = [i for i, v in enumerate(observed) if not np.isnan(v)]
+            obs_y = [observed[i] for i in obs_x]
+            if obs_x:
+                fig.add_trace(go.Scatter(x=obs_x, y=obs_y, mode='markers',
+                                         name='实测流量',
+                                         marker=dict(color='#c62828', size=10, symbol='star')))
+
+        fig.update_layout(
+            title='洪水预报多方案对比',
+            xaxis_title='预报时段',
+            yaxis_title='流量 (m³/s)',
+            height=500,
+            template='plotly_white',
+            hovermode='x unified'
+        )
+
+        summary_content += [
+            html.Strong("多方案预报结果摘要:"), html.Br(), html.Br()
+        ]
+        for mt, fr in all_forecast_results.items():
+            res = fr['result']
+            summary_content += [
+                html.Strong(f"{mt}:"), html.Br(),
+                f"  洪峰流量: {res['peak_flow']:.1f} m³/s", html.Br(),
+                f"  峰现时间: 第 {res['peak_time_idx']} 时段 ({res['peak_time_hours']:.0f} 小时后)",
+                html.Br(),
+            ]
+            if fr['Q_corrected'] is not None:
+                peak_corr = float(np.max(fr['Q_corrected']))
+                summary_content += [f"  校正后洪峰: {peak_corr:.1f} m³/s", html.Br()]
+
+        compare_table = dash_table.DataTable(
+            data=compare_rows,
+            columns=[{'name': c, 'id': c} for c in compare_rows[0].keys()] if compare_rows else [],
+            style_table={'overflowX': 'auto'},
+            style_header={'backgroundColor': '#ffe0b2', 'fontWeight': 'bold'},
+            style_cell={'textAlign': 'center', 'padding': '8px'},
+            style_data_conditional=[
+                {
+                    'if': {'filter_query': '{是否超警} eq "是 ✓"'},
+                    'backgroundColor': '#ffccbc',
+                    'color': '#bf360c',
+                    'fontWeight': 'bold'
+                }
+            ]
+        )
+
+        return fig, html.Div(summary_content), compare_table
