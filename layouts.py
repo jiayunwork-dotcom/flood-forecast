@@ -628,7 +628,7 @@ def layout_monitoring_tab():
 
     dismiss_buttons = []
     for i in range(5):
-        for j in range(4):
+        for j in range(1, 5):
             dismiss_buttons.append(
                 html.Div(
                     dbc.Button(f"解除-{i}-{j}",

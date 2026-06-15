@@ -120,7 +120,7 @@ monitoring_state = {
          'warning_level': DEFAULT_WARNING_LEVELS[i],
          'guarantee_level': DEFAULT_GUARANTEE_LEVELS[i],
          'water_level': [], 'flow': [],
-         'current_warning_level': 0,
+         'current_warning_level': 5,
          'peak_detected': False,
          'peak_time_idx': None,
          'estimated_peak_arrival': None,
@@ -164,7 +164,7 @@ def generate_flood_data(t: int, station_idx: int) -> tuple:
     travel_steps = calculate_travel_time_steps(0, mileage)
     peak_center = 20 + travel_steps
     spread = 9 + station_idx * 0.5
-    amplitude = 5.0 - station_idx * 0.2
+    amplitude = 5.8 - station_idx * 0.25
 
     if t < peak_center - spread:
         flood_component = 0

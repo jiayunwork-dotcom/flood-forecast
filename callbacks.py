@@ -1888,7 +1888,7 @@ hr {{ border: 1px solid #e0e0e0; }}</style></head><body>
                 st = monitoring_state['stations'][i]
                 st['water_level'] = []
                 st['flow'] = []
-                st['current_warning_level'] = 0
+                st['current_warning_level'] = 5
                 st['peak_detected'] = False
                 st['peak_time_idx'] = None
                 st['estimated_peak_arrival'] = None
@@ -1916,7 +1916,7 @@ hr {{ border: 1px solid #e0e0e0; }}</style></head><body>
         [Input('mon-interval', 'n_intervals'),
          Input('btn-mon-export-log', 'n_clicks')] +
         [Input(f'mon-dismiss-warning-{i}-{j}', 'n_clicks')
-         for i in range(5) for j in range(4)],
+         for i in range(5) for j in range(1, 5)],
         [State('mon-interval', 'disabled')]
     )
     def update_monitoring(n_intervals, export_clicks, *args):
@@ -1956,8 +1956,8 @@ hr {{ border: 1px solid #e0e0e0; }}</style></head><body>
                             break
 
         t = monitoring_state['time_step']
-        if not disabled and n_intervals >= t and trigger == 'mon-interval.n_intervals':
-            t = n_intervals
+        if not disabled and trigger == 'mon-interval.n_intervals':
+            t += 1
             monitoring_state['time_step'] = t
 
             upstream_peak_idx = None
@@ -2009,9 +2009,9 @@ hr {{ border: 1px solid #e0e0e0; }}</style></head><body>
                 new_level = get_warning_level(exceedance)
 
                 old_level = st['current_warning_level']
-                if new_level > old_level and new_level > 0:
+                if new_level < old_level and new_level > 0:
                     level_info = get_warning_info(new_level)
-                    is_upgrade = old_level > 0
+                    is_upgrade = old_level < 5 and old_level > 0
                     warning_record = {
                         'station_idx': i,
                         'station': st['name'],
@@ -2131,14 +2131,14 @@ hr {{ border: 1px solid #e0e0e0; }}</style></head><body>
                 status_color = '#4caf50'
                 status_text = '正常'
 
-            outputs_status_light.append(html.Div([
+            outputs_status_light.append([
                 html.Div(style={
                     'width': '18px', 'height': '18px', 'borderRadius': '50%',
                     'backgroundColor': status_color, 'display': 'inline-block',
                     'boxShadow': f'0 0 6px {status_color}', 'verticalAlign': 'middle'
                 }),
                 html.Span(status_text, style={'marginLeft': '6px', 'fontSize': '12px'})
-            ]))
+            ])
 
             if st['estimated_peak_arrival'] is not None and not st['peak_detected']:
                 remaining = max(0, st['estimated_peak_arrival'] - monitoring_state['time_step'])
