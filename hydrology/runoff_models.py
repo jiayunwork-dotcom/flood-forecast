@@ -67,7 +67,7 @@ class SaturationExcessModel(RunoffModel):
         WU = float(params['WU0'])
         WL = float(params['WL0'])
         WD = float(params['WD0'])
-        K = float(params['K'])
+        K = float(params.get('K_ET', params.get('K', 1.0)))
         C = float(params['C'])
         WUM = float(params['WUM'])
         WLM = float(params['WLM'])

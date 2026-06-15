@@ -225,7 +225,7 @@ class RoutingModel:
 
         if method in ('Nash', '单位线'):
             nash_n = float(params.get('n', 2.0))
-            nash_K = float(params.get('K', 3.0))
+            nash_K = float(params.get('K_uh', params.get('K', 3.0)))
             uh_points = min(int(10 * nash_K / max(self.dt_hours, 0.1)), 100)
             uh_points = max(uh_points, 10)
             uh = UnitHydrograph.nash_uh(nash_n, nash_K, self.dt_hours, uh_points)

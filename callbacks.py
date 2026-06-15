@@ -249,40 +249,64 @@ def register_callbacks(app):
         defaults = default_config['defaults']
         bounds = dict(zip(default_config['names'], default_config['bounds']))
 
-        sat_params = ['WM', 'B', 'K', 'C', 'WUM', 'WLM']
+        sat_params = ['WM', 'WUM', 'WLM', 'B', 'K_ET', 'C']
         ga_params = ['Ks', 'Sf', 'theta_i', 'theta_s']
+        mix_param = ['sat_ratio']
+
+        all_params = sat_params + ga_params + mix_param
 
         if model_type == '蓄满产流':
-            params_to_show = sat_params
+            visible = set(sat_params)
         elif model_type == '超渗产流':
-            params_to_show = ga_params
+            visible = set(ga_params)
         else:
-            params_to_show = sat_params + ga_params + ['sat_ratio']
+            visible = set(all_params)
 
         param_labels = {
-            'WM': 'WM 最大蓄水容量 (mm)', 'B': 'B 蓄水容量分布指数',
-            'K': 'K 蒸散发折算系数', 'C': 'C 深层蒸散发系数',
-            'WUM': 'WUM 上层蓄水容量 (mm)', 'WLM': 'WLM 下层蓄水容量 (mm)',
-            'Ks': 'Ks 饱和导水率 (mm/h)', 'Sf': 'Sf 湿润锋吸力 (mm)',
-            'theta_i': 'θi 初始含水率', 'theta_s': 'θs 饱和含水率',
+            'WM': 'WM 最大蓄水容量 (mm)',
+            'WUM': 'WUM 上层蓄水容量 (mm)',
+            'WLM': 'WLM 下层蓄水容量 (mm)',
+            'B': 'B 蓄水容量分布指数',
+            'K_ET': 'K 蒸散发折算系数',
+            'C': 'C 深层蒸散发系数',
+            'Ks': 'Ks 饱和导水率 (mm/h)',
+            'Sf': 'Sf 湿润锋吸力 (mm)',
+            'theta_i': 'θi 初始含水率',
+            'theta_s': 'θs 饱和含水率',
             'sat_ratio': '饱和区域比例',
+        }
+
+        param_defaults_full = {
+            'WM': 150.0, 'WUM': 20.0, 'WLM': 60.0, 'B': 0.3, 'K_ET': 1.0, 'C': 0.15,
+            'Ks': 5.0, 'Sf': 50.0, 'theta_i': 0.20, 'theta_s': 0.45, 'sat_ratio': 0.3,
+        }
+        param_bounds_full = {
+            'WM': (100, 250), 'WUM': (10, 40), 'WLM': (30, 100), 'B': (0.1, 0.4),
+            'K_ET': (0.5, 1.5), 'C': (0.05, 0.3),
+            'Ks': (0.5, 15.0), 'Sf': (10, 200), 'theta_i': (0.10, 0.35),
+            'theta_s': (0.35, 0.55), 'sat_ratio': (0.1, 0.9),
         }
 
         rows = []
         row_inputs = []
-        for i, p in enumerate(params_to_show):
-            if p in defaults:
-                step = 0.01 if p in ['B', 'C', 'theta_i', 'theta_s', 'sat_ratio'] else 1
-                row_inputs.append(dbc.Col([
+        count = 0
+        for p in all_params:
+            is_visible = p in visible
+            value = defaults.get(p, param_defaults_full.get(p, 0))
+            lo, hi = param_bounds_full.get(p, (0, 1000))
+            step = 0.01 if p in ['B', 'C', 'K_ET', 'theta_i', 'theta_s', 'sat_ratio'] else 1
+            style = {} if is_visible else {'display': 'none'}
+            row_inputs.append(dbc.Col([
+                html.Div([
                     html.Label(param_labels.get(p, p)),
                     dbc.Input(id=f'param-{p}', type='number',
-                              value=round(defaults[p], 4), step=step,
-                              min=bounds.get(p, [0, 1000])[0],
-                              max=bounds.get(p, [0, 1000])[1])
-                ], width=4))
-                if (i + 1) % 3 == 0:
-                    rows.append(dbc.Row(row_inputs, className="mb-2"))
-                    row_inputs = []
+                              value=round(value, 4), step=step, min=lo, max=hi)
+                ], style=style)
+            ], width=4))
+            count += 1
+            if count % 3 == 0:
+                rows.append(dbc.Row(row_inputs, className="mb-2"))
+                row_inputs = []
 
         if row_inputs:
             rows.append(dbc.Row(row_inputs, className="mb-2"))
@@ -295,10 +319,22 @@ def register_callbacks(app):
         [Input('btn-run-runoff', 'n_clicks'),
          Input('runoff-result-tabs', 'value')],
         [State('runoff-model-type', 'value'),
-         State('runoff-event-selector', 'value')],
+         State('runoff-event-selector', 'value'),
+         State('param-WM', 'value'),
+         State('param-WUM', 'value'),
+         State('param-WLM', 'value'),
+         State('param-B', 'value'),
+         State('param-K_ET', 'value'),
+         State('param-C', 'value'),
+         State('param-Ks', 'value'),
+         State('param-Sf', 'value'),
+         State('param-theta_i', 'value'),
+         State('param-theta_s', 'value'),
+         State('param-sat_ratio', 'value')],
         prevent_initial_call=True
     )
-    def run_runoff_calc(n_clicks, result_tab, model_type, event_id):
+    def run_runoff_calc(n_clicks, result_tab, model_type, event_id,
+                        WM, WUM, WLM, B, K_ET, C, Ks, Sf, theta_i, theta_s, sat_ratio):
         if n_clicks is None or event_id is None or event_id == -1:
             return create_empty_figure("请选择场次并运行计算"), "请先选择场次洪水并设置参数"
 
@@ -317,6 +353,30 @@ def register_callbacks(app):
         defaults = default_config['defaults']
 
         params = dict(defaults)
+        if WM is not None:
+            params['WM'] = float(WM)
+        if WUM is not None:
+            params['WUM'] = float(WUM)
+        if WLM is not None:
+            params['WLM'] = float(WLM)
+        if B is not None:
+            params['B'] = float(B)
+        if K_ET is not None:
+            params['K_ET'] = float(K_ET)
+            params['K'] = float(K_ET)
+        if C is not None:
+            params['C'] = float(C)
+        if Ks is not None:
+            params['Ks'] = float(Ks)
+        if Sf is not None:
+            params['Sf'] = float(Sf)
+        if theta_i is not None:
+            params['theta_i'] = float(theta_i)
+        if theta_s is not None:
+            params['theta_s'] = float(theta_s)
+        if sat_ratio is not None:
+            params['sat_ratio'] = float(sat_ratio)
+
         result = model.run(rainfall, evaporation, **params)
 
         fig = go.Figure()

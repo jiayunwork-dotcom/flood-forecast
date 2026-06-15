@@ -334,9 +334,11 @@ class ModelCalibrator:
     def get_default_param_config(runoff_type: str, routing_method: str) -> Dict:
         """获取默认参数配置和范围"""
         sat_params = {
-            'WM': (100.0, 200.0, 150.0),
+            'WM': (100.0, 250.0, 150.0),
+            'WUM': (10.0, 40.0, 20.0),
+            'WLM': (30.0, 100.0, 60.0),
             'B': (0.1, 0.4, 0.3),
-            'K': (0.5, 2.0, 1.0),
+            'K_ET': (0.5, 1.5, 1.0),
             'C': (0.05, 0.3, 0.15)
         }
         ga_params = {
@@ -347,7 +349,7 @@ class ModelCalibrator:
         }
         routing_params = {
             'n': (1.0, 5.0, 2.0),
-            'K': (1.0, 48.0, 6.0),
+            'K_uh': (1.0, 48.0, 6.0),
             'Kg': (12.0, 120.0, 48.0)
         }
 
