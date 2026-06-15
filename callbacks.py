@@ -1897,6 +1897,12 @@ hr {{ border: 1px solid #e0e0e0; }}</style></head><body>
             monitoring_state['decisions'] = []
             monitoring_state['peak_deviations'] = []
             monitoring_state['logs'] = []
+            monitoring_state['resources']['allocated'] = [0] * 5
+            monitoring_state['resources']['history'] = []
+            monitoring_state['resources']['details'] = []
+            monitoring_state['correlation']['last_data_length'] = 0
+            monitoring_state['correlation']['corr_matrix'] = None
+            monitoring_state['correlation']['lag_corr_cache'] = {}
             return True, "就绪", 0
 
         return True, "就绪", 0
@@ -1908,7 +1914,11 @@ hr {{ border: 1px solid #e0e0e0; }}</style></head><body>
          Output('mon-warning-count', 'children'),
          Output('mon-decision-area', 'children'),
          Output('mon-deviation-table', 'children'),
-         Output('mon-download-log', 'data')] +
+         Output('mon-download-log', 'data'),
+         Output('res-collapse', 'is_open'),
+         Output('res-panel-badge', 'children'),
+         Output('corr-data-status', 'children'),
+         Output('corr-last-length', 'data')] +
         [Output(f'mon-current-level-{i}', 'children') for i in range(5)] +
         [Output(f'mon-current-flow-{i}', 'children') for i in range(5)] +
         [Output(f'mon-status-light-{i}', 'children') for i in range(5)] +
@@ -1917,11 +1927,15 @@ hr {{ border: 1px solid #e0e0e0; }}</style></head><body>
          Input('btn-mon-export-log', 'n_clicks')] +
         [Input(f'mon-dismiss-warning-{i}-{j}', 'n_clicks')
          for i in range(5) for j in range(1, 5)],
-        [State('mon-interval', 'disabled')]
+        [State('mon-interval', 'disabled'),
+         State('res-collapse', 'is_open'),
+         State('corr-last-length', 'data')]
     )
     def update_monitoring(n_intervals, export_clicks, *args):
-        dismiss_args = args[:-1]
-        disabled = args[-1]
+        dismiss_args = args[:-3]
+        disabled = args[-3]
+        res_is_open = args[-2]
+        last_corr_length = args[-1]
 
         ctx = callback_context
         trigger = ctx.triggered[0]['prop_id'] if ctx.triggered else ''
@@ -2245,9 +2259,132 @@ hr {{ border: 1px solid #e0e0e0; }}</style></head><body>
             )
             deviation_display = dev_table
 
+        active_high_warnings = [w for w in monitoring_state['warnings']
+                              if w['level'] <= 2 and not w.get('dismissed')]
+        has_high_warning = len(active_high_warnings) > 0
+
+        if has_high_warning:
+            res_auto_open = True
+            res_badge = dbc.Badge("需响应", color="danger", pill=True, className="ms-2")
+        else:
+            res_auto_open = res_is_open if res_is_open is not None else False
+            res_badge = ""
+
+        current_data_length = len(monitoring_state['stations'][0]['water_level'])
+        if current_data_length < 10:
+            corr_status = f"⚠ 数据不足（{current_data_length}/10），请等待更多模拟数据"
+        else:
+            corr_status = f"✓ 数据充足（{current_data_length} 个时步）"
+            if last_corr_length != current_data_length:
+                monitoring_state['correlation']['last_data_length'] = current_data_length
+
         return tuple([
             fig, time_step_display, warning_cards_display,
             warning_count_text, decision_display, deviation_display,
-            export_data
+            export_data,
+            res_auto_open, res_badge,
+            corr_status, current_data_length
         ] + outputs_current_level + outputs_current_flow +
             outputs_status_light + outputs_peak_arrival)
+
+    # ============================================================
+    # 应急资源调配 - 回调
+    # ============================================================
+
+    @app.callback(
+        [Output(f'res-allocated-{i}', 'children') for i in range(5)] +
+        [Output('res-allocation-details', 'children'),
+         Output('res-allocation-history', 'children')],
+        [Input('btn-auto-allocate', 'n_clicks'),
+         Input('btn-reset-stock', 'n_clicks'),
+         Input('corr-last-length', 'data')] +
+        [Input(f'res-stock-{i}', 'value') for i in range(5)],
+        prevent_initial_call=False
+    )
+    def handle_resource_allocation(auto_click, reset_click, data_len, *stock_vals):
+        ctx = callback_context
+        if not ctx.triggered:
+            allocated = [str(x) for x in monitoring_state['resources']['allocated']]
+            details = render_allocation_details()
+            history = render_allocation_history()
+            return tuple(allocated + [details, history])
+
+        trigger = ctx.triggered[0]['prop_id']
+
+        for i in range(5):
+            if stock_vals[i] is not None:
+                monitoring_state['resources']['stock'][i] = int(stock_vals[i])
+
+        if trigger == 'btn-reset-stock.n_clicks':
+            monitoring_state['resources']['allocated'] = [0] * 5
+            monitoring_state['resources']['details'] = []
+        elif trigger == 'btn-auto-allocate.n_clicks':
+            calculate_auto_allocation()
+
+        allocated = [str(x) for x in monitoring_state['resources']['allocated']]
+        details = render_allocation_details()
+        history = render_allocation_history()
+        return tuple(allocated + [details, history])
+
+    # ============================================================
+    # 多站水位关联分析 - 回调
+    # ============================================================
+
+    @app.callback(
+        Output('corr-heatmap', 'figure'),
+        [Input('corr-last-length', 'data')],
+        prevent_initial_call=False
+    )
+    def update_correlation_heatmap(current_length):
+        if current_length is None or current_length < 10:
+            return create_empty_figure("站点间水位相关系数热力图")
+
+        last_len = monitoring_state['correlation']['last_data_length']
+        cached_matrix = monitoring_state['correlation']['corr_matrix']
+
+        if cached_matrix is not None and last_len == current_length:
+            return plot_correlation_heatmap(cached_matrix)
+
+        data_matrix = []
+        for i in range(5):
+            wl = monitoring_state['stations'][i]['water_level']
+            if len(wl) >= 10:
+                data_matrix.append(wl[-current_length:])
+            else:
+                return create_empty_figure("站点间水位相关系数热力图")
+
+        data_array = np.array(data_matrix)
+        corr_matrix = np.corrcoef(data_array)
+        monitoring_state['correlation']['corr_matrix'] = corr_matrix
+
+        return plot_correlation_heatmap(corr_matrix)
+
+    @app.callback(
+        Output('corr-lag-plot', 'figure'),
+        [Input('lag-ref-station', 'value'),
+         Input('corr-last-length', 'data')],
+        prevent_initial_call=False
+    )
+    def update_lag_correlation(ref_station, current_length):
+        if current_length is None or current_length < 10:
+            return create_empty_figure("滞后相关分析")
+
+        if ref_station is None:
+            ref_station = 0
+
+        cache_key = f"{ref_station}_{current_length}"
+        if cache_key in monitoring_state['correlation']['lag_corr_cache']:
+            return monitoring_state['correlation']['lag_corr_cache'][cache_key]
+
+        data_matrix = []
+        for i in range(5):
+            wl = monitoring_state['stations'][i]['water_level']
+            if len(wl) >= 10:
+                data_matrix.append(wl[-current_length:])
+            else:
+                return create_empty_figure("滞后相关分析")
+
+        fig = plot_lag_correlation(data_matrix, ref_station)
+        monitoring_state['correlation']['lag_corr_cache'][cache_key] = fig
+
+        return fig

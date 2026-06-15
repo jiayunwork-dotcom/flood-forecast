@@ -541,6 +541,133 @@ def layout_report_tab():
     ], className="mb-4")
 
 
+def create_resource_allocation_panel():
+    resource_header = [
+        html.Thead(html.Tr([
+            html.Th("应急资源", style={'width': '25%'}),
+            html.Th("库存数量", style={'width': '25%'}),
+            html.Th("已调配数量", style={'width': '25%'}),
+            html.Th("单位", style={'width': '25%'}),
+        ]))
+    ]
+
+    resource_rows = []
+    for i, (rtype, unit) in enumerate(zip(RESOURCE_TYPES, RESOURCE_UNITS)):
+        resource_rows.append(html.Tr([
+            html.Td(html.Strong(rtype)),
+            html.Td(dbc.Input(id=f'res-stock-{i}', type='number',
+                              value=DEFAULT_RESOURCE_STOCK[i],
+                              min=0, step=1, size='sm')),
+            html.Td(html.Span(id=f'res-allocated-{i}', children='0',
+                              className='fw-bold', style={'fontSize': '14px'})),
+            html.Td(unit),
+        ]))
+
+    resource_table = dbc.Table(
+        resource_header + [html.Tbody(resource_rows)],
+        bordered=True, hover=True, responsive=True, size='sm',
+        style={'backgroundColor': '#ffffff', 'marginBottom': '10px'}
+    )
+
+    allocation_buttons = html.Div([
+        dbc.Button("自动调配", id='btn-auto-allocate', color='warning',
+                   size='sm', className='me-2'),
+        dbc.Button("重置库存", id='btn-reset-stock', color='secondary',
+                   size='sm'),
+    ], className='mb-3')
+
+    allocation_details = html.Div([
+        html.Label("调配明细", className="fw-bold small"),
+        html.Div(id='res-allocation-details', children=[
+            html.Div("暂无调配记录",
+                     style={'color': '#999', 'fontStyle': 'italic',
+                            'padding': '10px', 'textAlign': 'center',
+                            'backgroundColor': '#f5f5f5', 'borderRadius': '4px'})
+        ], style={
+            'maxHeight': '120px', 'overflowY': 'auto',
+            'backgroundColor': '#fafafa', 'borderRadius': '4px',
+            'padding': '8px', 'fontSize': '12px'
+        }),
+    ], className='mb-3')
+
+    allocation_history = html.Div([
+        html.Label("调配历史记录", className="fw-bold small"),
+        html.Div(id='res-allocation-history', children=[
+            html.Div("暂无历史记录",
+                     style={'color': '#999', 'fontStyle': 'italic',
+                            'padding': '10px', 'textAlign': 'center',
+                            'backgroundColor': '#f5f5f5', 'borderRadius': '4px'})
+        ], style={
+            'maxHeight': '150px', 'overflowY': 'auto',
+            'backgroundColor': '#fafafa', 'borderRadius': '4px',
+            'padding': '8px', 'fontSize': '12px'
+        }),
+    ])
+
+    return dbc.Card([
+        dbc.CardHeader([
+            html.H6("应急资源调配", className="mb-0 fw-bold"),
+            html.Span(id='res-panel-badge', children='', className='ms-2')
+        ]),
+        dbc.Collapse(id='res-collapse', is_open=False, children=[
+            dbc.CardBody([
+                resource_table,
+                allocation_buttons,
+                allocation_details,
+                allocation_history,
+            ])
+        ])
+    ], className='mb-4')
+
+
+def create_correlation_analysis_panel():
+    heatmap_section = html.Div([
+        html.Label("站点间水位相关系数热力图", className="fw-bold mb-2 d-block"),
+        dcc.Loading(id='corr-heatmap-loading', type='circle', children=[
+            dcc.Graph(id='corr-heatmap',
+                      figure=create_empty_figure("站点间水位相关系数热力图"),
+                      style={'height': '350px'})
+        ]),
+    ], className='mb-4')
+
+    lag_section = html.Div([
+        dbc.Row([
+            dbc.Col([
+                html.Label("滞后相关分析", className="fw-bold mb-2 d-block"),
+            ], md=6),
+            dbc.Col([
+                dcc.Dropdown(
+                    id='lag-ref-station',
+                    options=[{'label': f'{st["name"]}', 'value': i}
+                             for i, st in enumerate(monitoring_state['stations'])],
+                    value=0,
+                    clearable=False,
+                    style={'marginBottom': '10px'}
+                ),
+            ], md=6),
+        ]),
+        dcc.Loading(id='corr-lag-loading', type='circle', children=[
+            dcc.Graph(id='corr-lag-plot',
+                      figure=create_empty_figure("滞后相关分析"),
+                      style={'height': '300px'})
+        ]),
+    ])
+
+    return dbc.Card([
+        dbc.CardHeader([
+            html.H6("关联分析", className="mb-0 fw-bold"),
+        ]),
+        dbc.Collapse(id='corr-collapse', is_open=True, children=[
+            dbc.CardBody([
+                html.Div(id='corr-data-status', children='',
+                         className='mb-2 small', style={'color': '#f57f17'}),
+                heatmap_section,
+                lag_section,
+            ])
+        ])
+    ], className='mb-4')
+
+
 def layout_monitoring_tab():
     station_table_header = [
         html.Thead(html.Tr([
@@ -638,12 +765,21 @@ def layout_monitoring_tab():
                 )
             )
 
+    resource_buttons = html.Div([
+        html.Div(dbc.Button("toggle-res", id='btn-toggle-res',
+                            style={'display': 'none'})),
+        html.Div(dbc.Button("toggle-corr", id='btn-toggle-corr',
+                            style={'display': 'none'})),
+    ], style={'display': 'none'})
+
     return dbc.Card([
         dbc.CardHeader(html.H4("九、实时监测与预警决策支持", className="mb-0")),
         dbc.CardBody([
             dcc.Interval(id='mon-interval', interval=3000, disabled=True, n_intervals=0),
             dcc.Download(id='mon-download-log'),
             html.Div(dismiss_buttons, style={'display': 'none'}),
+            html.Div(resource_buttons, style={'display': 'none'}),
+            dcc.Store(id='corr-last-length', data=0),
 
             dbc.Row([
                 dbc.Col([
@@ -672,6 +808,8 @@ def layout_monitoring_tab():
                                       style={'height': '400px'}),
                         ])
                     ], className='mb-4'),
+
+                    create_correlation_analysis_panel(),
 
                     dbc.Card([
                         dbc.CardHeader([
@@ -711,6 +849,8 @@ def layout_monitoring_tab():
                             }),
                         ])
                     ], className='mb-4'),
+
+                    create_resource_allocation_panel(),
 
                     dbc.Card([
                         dbc.CardHeader(html.H6("洪水演进偏差表", className="mb-0 fw-bold")),
