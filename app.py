@@ -38,6 +38,9 @@ app.layout = dbc.Container([
         dcc.Tab(label='8.报告导出', value='report', children=[
             html.Div([layout_report_tab()], className="mt-4")
         ]),
+        dcc.Tab(label='9.实时监测与预警', value='monitoring', children=[
+            html.Div([layout_monitoring_tab()], className="mt-4")
+        ]),
     ]),
 ], fluid=True, style={'maxWidth': '1400px'})
 

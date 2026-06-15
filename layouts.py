@@ -539,3 +539,193 @@ def layout_report_tab():
             dcc.Download(id='download-report'),
         ])
     ], className="mb-4")
+
+
+def layout_monitoring_tab():
+    station_table_header = [
+        html.Thead(html.Tr([
+            html.Th("站点名称", style={'width': '12%'}),
+            html.Th("里程桩号(km)", style={'width': '13%'}),
+            html.Th("警戒水位(m)", style={'width': '13%'}),
+            html.Th("保证水位(m)", style={'width': '13%'}),
+            html.Th("当前水位(m)", style={'width': '12%'}),
+            html.Th("当前流量(m³/s)", style={'width': '13%'}),
+            html.Th("预计洪峰到达", style={'width': '13%'}),
+            html.Th("状态", style={'width': '11%'}),
+        ]))
+    ]
+
+    station_rows = []
+    for i in range(5):
+        st = monitoring_state['stations'][i]
+        station_rows.append(html.Tr([
+            html.Td(dbc.Input(id=f'mon-station-name-{i}', type='text',
+                              value=st['name'], size='sm', readonly=True)),
+            html.Td(dbc.Input(id=f'mon-station-mileage-{i}', type='number',
+                              value=st['mileage'], step=1, size='sm', readonly=True)),
+            html.Td(dbc.Input(id=f'mon-station-warning-{i}', type='number',
+                              value=st['warning_level'], step=0.1, size='sm')),
+            html.Td(dbc.Input(id=f'mon-station-guarantee-{i}', type='number',
+                              value=st['guarantee_level'], step=0.1, size='sm')),
+            html.Td(html.Span(id=f'mon-current-level-{i}', children='--',
+                              className='fw-bold', style={'fontSize': '14px'})),
+            html.Td(html.Span(id=f'mon-current-flow-{i}', children='--',
+                              className='fw-bold', style={'fontSize': '14px'})),
+            html.Td(html.Span(id=f'mon-peak-arrival-{i}', children='--',
+                              style={'fontSize': '13px', 'color': '#1565c0'})),
+            html.Td(html.Div(id=f'mon-status-light-{i}', children=[
+                html.Div(style={
+                    'width': '18px', 'height': '18px', 'borderRadius': '50%',
+                    'backgroundColor': '#4caf50', 'display': 'inline-block',
+                    'boxShadow': '0 0 6px #4caf50', 'verticalAlign': 'middle'
+                }),
+                html.Span('正常', style={'marginLeft': '6px', 'fontSize': '12px'})
+            ])),
+        ]))
+
+    station_table = dbc.Table(
+        station_table_header + [html.Tbody(station_rows)],
+        bordered=True, hover=True, responsive=True, size='sm',
+        style={'backgroundColor': '#ffffff'}
+    )
+
+    basin_schematic = html.Div([
+        html.Label("流域示意（上游→下游）", className="fw-bold mb-2 d-block"),
+        html.Div([
+            html.Div([
+                html.Span(st['name'], style={
+                    'backgroundColor': STATION_COLORS[i],
+                    'color': '#fff', 'padding': '3px 8px', 'borderRadius': '4px',
+                    'fontSize': '11px', 'fontWeight': 'bold', 'display': 'inline-block',
+                    'minWidth': '50px', 'textAlign': 'center'
+                })
+            ], style={'display': 'inline-block', 'textAlign': 'center',
+                      'width': '18%', 'verticalAlign': 'middle'})
+            for i, st in enumerate(monitoring_state['stations'])
+        ] + [
+            html.Div('→' * 3, style={'display': 'inline-block',
+                                     'width': '2.5%', 'color': '#999',
+                                     'textAlign': 'center', 'verticalAlign': 'middle'})
+            for _ in range(4)
+        ], style={'whiteSpace': 'nowrap', 'overflowX': 'auto',
+                  'padding': '8px', 'backgroundColor': '#e3f2fd',
+                  'borderRadius': '4px', 'marginBottom': '10px'})
+    ])
+
+    control_buttons = html.Div([
+        dbc.Button("开始模拟", id='btn-mon-start', color='success',
+                   size='md', className='me-2'),
+        dbc.Button("暂停", id='btn-mon-pause', color='warning',
+                   size='md', className='me-2'),
+        dbc.Button("重置", id='btn-mon-reset', color='danger',
+                   size='md', className='me-2'),
+        html.Span(id='mon-sim-status', children='就绪',
+                  className='ms-2 fw-bold', style={'fontSize': '14px'}),
+        html.Span(id='mon-time-step',
+                  children=f" | 时间步: T0",
+                  className='ms-2', style={'color': '#666'}),
+    ], className='mb-3')
+
+    dismiss_buttons = []
+    for i in range(5):
+        for j in range(4):
+            dismiss_buttons.append(
+                html.Div(
+                    dbc.Button(f"解除-{i}-{j}",
+                               id=f'mon-dismiss-warning-{i}-{j}',
+                               size="sm", color="secondary", outline=True),
+                    style={'display': 'none'}
+                )
+            )
+
+    return dbc.Card([
+        dbc.CardHeader(html.H4("九、实时监测与预警决策支持", className="mb-0")),
+        dbc.CardBody([
+            dcc.Interval(id='mon-interval', interval=3000, disabled=True, n_intervals=0),
+            dcc.Download(id='mon-download-log'),
+            html.Div(dismiss_buttons, style={'display': 'none'}),
+
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader([
+                            html.H6("站点管理与流域示意", className="mb-0 fw-bold"),
+                            basin_schematic,
+                        ]),
+                        dbc.CardBody([
+                            station_table,
+                            html.Div(id='mon-save-status',
+                                     className='mt-2 text-success small'),
+                            dbc.Button("保存站点参数", id='btn-mon-save-stations',
+                                       color='primary', size='sm', className='mt-2'),
+                        ])
+                    ], className='mb-4'),
+
+                    dbc.Card([
+                        dbc.CardHeader([
+                            html.H6("实时数据模拟", className="mb-0 fw-bold"),
+                            control_buttons,
+                        ]),
+                        dbc.CardBody([
+                            dcc.Graph(id='mon-water-level-plot',
+                                      figure=create_empty_figure("实时水位过程线"),
+                                      style={'height': '400px'}),
+                        ])
+                    ], className='mb-4'),
+
+                    dbc.Card([
+                        dbc.CardHeader([
+                            html.H6("决策建议", className="mb-0 fw-bold"),
+                            dbc.Button("导出预警日志", id='btn-mon-export-log',
+                                       color='info', size='sm', className='float-end'),
+                        ]),
+                        dbc.CardBody([
+                            html.Div(id='mon-decision-area', children=[
+                                html.Div("暂无决策建议（出现Ⅱ级及以上预警时自动生成）",
+                                         style={'color': '#999', 'fontStyle': 'italic',
+                                                'padding': '20px', 'textAlign': 'center'})
+                            ], style={
+                                'maxHeight': '200px', 'overflowY': 'auto',
+                                'backgroundColor': '#fafafa', 'borderRadius': '4px',
+                                'padding': '10px'
+                            }),
+                        ])
+                    ]),
+
+                ], md=8),
+
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader(html.H6("预警研判面板", className="mb-0 fw-bold")),
+                        dbc.CardBody([
+                            html.Div(id='mon-warning-count',
+                                     className='mb-2 small text-muted'),
+                            html.Div(id='mon-warning-cards', children=[
+                                html.Div("暂无预警信息",
+                                         style={'color': '#999', 'fontStyle': 'italic',
+                                                'padding': '30px', 'textAlign': 'center',
+                                                'backgroundColor': '#f5f5f5',
+                                                'borderRadius': '4px'})
+                            ], style={
+                                'maxHeight': '450px', 'overflowY': 'auto'
+                            }),
+                        ])
+                    ], className='mb-4'),
+
+                    dbc.Card([
+                        dbc.CardHeader(html.H6("洪水演进偏差表", className="mb-0 fw-bold")),
+                        dbc.CardBody([
+                            html.Div(id='mon-deviation-table', children=[
+                                html.Div("暂无偏差记录（洪峰到达后自动记录）",
+                                         style={'color': '#999', 'fontStyle': 'italic',
+                                                'padding': '15px', 'textAlign': 'center',
+                                                'backgroundColor': '#f5f5f5',
+                                                'borderRadius': '4px'})
+                            ]),
+                        ])
+                    ]),
+
+                ], md=4),
+            ]),
+        ])
+    ], className="mb-4")

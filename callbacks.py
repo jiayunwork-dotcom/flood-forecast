@@ -1833,3 +1833,421 @@ hr {{ border: 1px solid #e0e0e0; }}</style></head><body>
         )
 
         return fig, html.Div(summary_content), compare_table
+
+    # ============================================================
+    # 实时监测与预警决策支持 - 回调
+    # ============================================================
+
+    @app.callback(
+        Output('mon-save-status', 'children'),
+        [Input('btn-mon-save-stations', 'n_clicks')],
+        [State(f'mon-station-warning-{i}', 'value') for i in range(5)] +
+        [State(f'mon-station-guarantee-{i}', 'value') for i in range(5)],
+        prevent_initial_call=True
+    )
+    def save_monitoring_stations(n_clicks, *args):
+        if n_clicks is None:
+            return ""
+        warnings = args[:5]
+        guarantees = args[5:]
+        for i in range(5):
+            if warnings[i] is not None:
+                monitoring_state['stations'][i]['warning_level'] = float(warnings[i])
+            if guarantees[i] is not None:
+                monitoring_state['stations'][i]['guarantee_level'] = float(guarantees[i])
+        return "✓ 站点参数已保存"
+
+    @app.callback(
+        [Output('mon-interval', 'disabled'),
+         Output('mon-sim-status', 'children'),
+         Output('mon-interval', 'n_intervals')],
+        [Input('btn-mon-start', 'n_clicks'),
+         Input('btn-mon-pause', 'n_clicks'),
+         Input('btn-mon-reset', 'n_clicks')],
+        prevent_initial_call=False
+    )
+    def control_simulation(start_clicks, pause_clicks, reset_clicks):
+        ctx = callback_context
+        if not ctx.triggered:
+            return True, "就绪", 0
+
+        trigger = ctx.triggered[0]['prop_id']
+
+        if trigger == 'btn-mon-start.n_clicks':
+            monitoring_state['running'] = True
+            return False, "运行中 ▶", monitoring_state['time_step']
+
+        elif trigger == 'btn-mon-pause.n_clicks':
+            monitoring_state['running'] = False
+            return True, "已暂停 ⏸", monitoring_state['time_step']
+
+        elif trigger == 'btn-mon-reset.n_clicks':
+            monitoring_state['running'] = False
+            monitoring_state['time_step'] = 0
+            for i in range(5):
+                st = monitoring_state['stations'][i]
+                st['water_level'] = []
+                st['flow'] = []
+                st['current_warning_level'] = 0
+                st['peak_detected'] = False
+                st['peak_time_idx'] = None
+                st['estimated_peak_arrival'] = None
+                st['actual_peak_arrival'] = None
+            monitoring_state['warnings'] = []
+            monitoring_state['decisions'] = []
+            monitoring_state['peak_deviations'] = []
+            monitoring_state['logs'] = []
+            return True, "就绪", 0
+
+        return True, "就绪", 0
+
+    @app.callback(
+        [Output('mon-water-level-plot', 'figure'),
+         Output('mon-time-step', 'children'),
+         Output('mon-warning-cards', 'children'),
+         Output('mon-warning-count', 'children'),
+         Output('mon-decision-area', 'children'),
+         Output('mon-deviation-table', 'children'),
+         Output('mon-download-log', 'data')] +
+        [Output(f'mon-current-level-{i}', 'children') for i in range(5)] +
+        [Output(f'mon-current-flow-{i}', 'children') for i in range(5)] +
+        [Output(f'mon-status-light-{i}', 'children') for i in range(5)] +
+        [Output(f'mon-peak-arrival-{i}', 'children') for i in range(5)],
+        [Input('mon-interval', 'n_intervals'),
+         Input('btn-mon-export-log', 'n_clicks')] +
+        [Input(f'mon-dismiss-warning-{i}-{j}', 'n_clicks')
+         for i in range(5) for j in range(4)],
+        [State('mon-interval', 'disabled')]
+    )
+    def update_monitoring(n_intervals, export_clicks, *args):
+        dismiss_args = args[:-1]
+        disabled = args[-1]
+
+        ctx = callback_context
+        trigger = ctx.triggered[0]['prop_id'] if ctx.triggered else ''
+
+        export_data = None
+        if trigger == 'btn-mon-export-log.n_clicks':
+            log_lines = []
+            for log in monitoring_state['logs']:
+                log_lines.append(
+                    f"[时间步T{log['time_step']}] 站点{log['station']} "
+                    f"预警等级{log['level_name']} 水位{log['water_level']:.2f}m "
+                    f"超警{log['exceedance']:.2f}m"
+                )
+            for dec in monitoring_state['decisions']:
+                log_lines.append(f"[时间步T{dec['time_step']}] 决策建议: {dec['content']}")
+            if log_lines:
+                log_content = '\n'.join(log_lines)
+                export_data = dcc.send_string(
+                    log_content,
+                    f"预警日志_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+                )
+
+        for inp in ctx.triggered:
+            pid = inp['prop_id']
+            if pid.startswith('mon-dismiss-warning-') and inp['value']:
+                parts = pid.replace('mon-dismiss-warning-', '').replace('.n_clicks', '').split('-')
+                if len(parts) == 2:
+                    si, li = int(parts[0]), int(parts[1])
+                    for w in monitoring_state['warnings']:
+                        if w['station_idx'] == si and w['level'] == li and not w.get('dismissed'):
+                            w['dismissed'] = True
+                            break
+
+        t = monitoring_state['time_step']
+        if not disabled and n_intervals >= t and trigger == 'mon-interval.n_intervals':
+            t = n_intervals
+            monitoring_state['time_step'] = t
+
+            upstream_peak_idx = None
+            for i in range(5):
+                wl, fl = generate_flood_data(t, i)
+                st = monitoring_state['stations'][i]
+                st['water_level'].append(wl)
+                st['flow'].append(fl)
+
+                flows = st['flow']
+                base_flow = 20 + i * 15
+                if t >= 12 and len(flows) >= 5 and not st['peak_detected']:
+                    mid_idx = len(flows) - 3
+                    mid_flow = flows[mid_idx]
+                    if mid_flow > base_flow * 1.5:
+                        is_peak = True
+                        for k in range(1, 3):
+                            if mid_idx - k >= 0 and flows[mid_idx - k] >= mid_flow:
+                                is_peak = False
+                                break
+                            if mid_idx + k < len(flows) and flows[mid_idx + k] >= mid_flow:
+                                is_peak = False
+                                break
+                        if is_peak:
+                            st['peak_detected'] = True
+                            st['peak_time_idx'] = mid_idx
+                            st['actual_peak_arrival'] = t - 2
+                            if i == 0:
+                                upstream_peak_idx = st['peak_time_idx']
+                                for j in range(1, 5):
+                                    travel = calculate_travel_time_steps(
+                                        monitoring_state['stations'][0]['mileage'],
+                                        monitoring_state['stations'][j]['mileage']
+                                    )
+                                    monitoring_state['stations'][j]['estimated_peak_arrival'] = round(
+                                        st['actual_peak_arrival'] + travel, 1
+                                    )
+                            elif st['estimated_peak_arrival'] is not None:
+                                deviation = st['actual_peak_arrival'] - st['estimated_peak_arrival']
+                                monitoring_state['peak_deviations'].append({
+                                    'station': st['name'],
+                                    'estimated': st['estimated_peak_arrival'],
+                                    'actual': st['actual_peak_arrival'],
+                                    'deviation': round(deviation, 1)
+                                })
+
+                warning_level = st['warning_level']
+                exceedance = wl - warning_level
+                new_level = get_warning_level(exceedance)
+
+                old_level = st['current_warning_level']
+                if new_level > old_level and new_level > 0:
+                    level_info = get_warning_info(new_level)
+                    is_upgrade = old_level > 0
+                    warning_record = {
+                        'station_idx': i,
+                        'station': st['name'],
+                        'time_step': t,
+                        'water_level': wl,
+                        'flow': fl,
+                        'exceedance': round(exceedance, 2),
+                        'level': new_level,
+                        'level_name': level_info['name'],
+                        'color': level_info['color'],
+                        'bg': level_info['bg'],
+                        'upgrade': is_upgrade,
+                        'dismissed': False
+                    }
+                    monitoring_state['warnings'].append(warning_record)
+                    monitoring_state['logs'].append({
+                        'time_step': t,
+                        'station': st['name'],
+                        'level_name': level_info['name'],
+                        'water_level': wl,
+                        'exceedance': round(exceedance, 2)
+                    })
+                    st['current_warning_level'] = new_level
+
+                    if new_level <= 2:
+                        active_high = [w for w in monitoring_state['warnings']
+                                       if w['level'] <= 2 and not w.get('dismissed')]
+                        active_ii = [w for w in active_high if w['level'] == 2]
+                        active_i = [w for w in active_high if w['level'] == 1]
+                        unique_stations = set(w['station'] for w in active_high)
+
+                        suggestion = None
+                        if active_i:
+                            suggestion = "立即启动应急响应预案"
+                        elif len(unique_stations) >= 2 and len(active_ii) >= 2:
+                            suggestion = "启动流域联合调度"
+                        elif active_ii:
+                            suggestion = "加密监测频次至10分钟"
+
+                        if suggestion:
+                            existing = [d for d in monitoring_state['decisions']
+                                        if d['content'] == suggestion]
+                            if not existing:
+                                monitoring_state['decisions'].insert(0, {
+                                    'time_step': t,
+                                    'content': suggestion,
+                                    'timestamp': datetime.now().strftime('%H:%M:%S')
+                                })
+
+        fig = go.Figure()
+        x_vals = list(range(max(1, monitoring_state['time_step'] + 1)))
+
+        for i in range(5):
+            st = monitoring_state['stations'][i]
+            wl_data = st['water_level']
+            if wl_data:
+                fig.add_trace(go.Scatter(
+                    x=list(range(len(wl_data))),
+                    y=wl_data,
+                    mode='lines+markers',
+                    name=st['name'],
+                    line=dict(color=STATION_COLORS[i], width=2),
+                    marker=dict(size=5)
+                ))
+                fig.add_hline(
+                    y=st['warning_level'],
+                    line_dash="dash",
+                    line_color=STATION_COLORS[i],
+                    line_width=1,
+                    opacity=0.6,
+                    annotation_text=f"{st['name']}警戒{st['warning_level']:.1f}m",
+                    annotation_position="top right",
+                    annotation_font_size=9
+                )
+
+        fig.update_layout(
+            title='实时水位过程线（5个站点）',
+            xaxis_title='时间步 T',
+            yaxis_title='水位 (m)',
+            height=400,
+            template='plotly_white',
+            hovermode='x unified',
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        if monitoring_state['stations'][0]['water_level']:
+            max_wl = max(max(s['water_level']) for s in monitoring_state['stations'] if s['water_level'])
+            fig.update_yaxes(range=[1.5, max(9.0, max_wl + 0.5)])
+        else:
+            fig.update_yaxes(range=[1.5, 9.0])
+
+        time_step_display = f" | 时间步: T{monitoring_state['time_step']}"
+
+        outputs_current_level = []
+        outputs_current_flow = []
+        outputs_status_light = []
+        outputs_peak_arrival = []
+
+        for i in range(5):
+            st = monitoring_state['stations'][i]
+            if st['water_level']:
+                outputs_current_level.append(f"{st['water_level'][-1]:.2f}")
+                outputs_current_flow.append(f"{st['flow'][-1]:.1f}")
+            else:
+                outputs_current_level.append('--')
+                outputs_current_flow.append('--')
+
+            wl = st['water_level'][-1] if st['water_level'] else 0
+            gl = st['guarantee_level']
+            wl_level = st['warning_level']
+            if wl >= gl:
+                status_color = '#f44336'
+                status_text = '超保证'
+            elif wl >= wl_level:
+                status_color = '#ffeb3b'
+                status_text = '超警戒'
+            else:
+                status_color = '#4caf50'
+                status_text = '正常'
+
+            outputs_status_light.append(html.Div([
+                html.Div(style={
+                    'width': '18px', 'height': '18px', 'borderRadius': '50%',
+                    'backgroundColor': status_color, 'display': 'inline-block',
+                    'boxShadow': f'0 0 6px {status_color}', 'verticalAlign': 'middle'
+                }),
+                html.Span(status_text, style={'marginLeft': '6px', 'fontSize': '12px'})
+            ]))
+
+            if st['estimated_peak_arrival'] is not None and not st['peak_detected']:
+                remaining = max(0, st['estimated_peak_arrival'] - monitoring_state['time_step'])
+                outputs_peak_arrival.append(f"T{st['estimated_peak_arrival']:.0f}(剩{remaining:.0f}步)")
+            elif st['peak_detected'] and st['peak_time_idx'] is not None:
+                outputs_peak_arrival.append(f"已到达T{st['actual_peak_arrival']}")
+            else:
+                outputs_peak_arrival.append('--')
+
+        warning_cards = []
+        active_warnings = [w for w in monitoring_state['warnings'] if not w.get('dismissed')]
+        warning_count_text = f"共 {len(active_warnings)} 条活跃预警"
+
+        if not active_warnings:
+            warning_cards_display = html.Div("暂无预警信息",
+                style={'color': '#999', 'fontStyle': 'italic',
+                       'padding': '30px', 'textAlign': 'center',
+                       'backgroundColor': '#f5f5f5', 'borderRadius': '4px'})
+        else:
+            card_list = []
+            for idx, w in enumerate(reversed(active_warnings)):
+                upgrade_tag = ""
+                if w.get('upgrade'):
+                    upgrade_tag = dbc.Badge("升级", color="danger",
+                                            className="ms-2", pill=True)
+                dismiss_btn = dbc.Button("解除",
+                    id=f"mon-dismiss-warning-{w['station_idx']}-{w['level']}",
+                    size="sm", color="secondary", outline=True,
+                    style={'fontSize': '11px', 'padding': '2px 8px'})
+
+                card = dbc.Card([
+                    dbc.CardBody([
+                        html.Div([
+                            html.Strong(f"{w['station']}",
+                                style={'color': w['color'], 'fontSize': '15px'}),
+                            upgrade_tag,
+                            html.Div(dismiss_btn, style={'float': 'right'})
+                        ]),
+                        html.Div([
+                            html.Span(f"预警等级: ", className='small text-muted'),
+                            html.Strong(w['level_name'],
+                                style={'color': w['color'], 'fontSize': '14px'})
+                        ], className='mt-1'),
+                        html.Div([
+                            f"触发时间: 第T{w['time_step']}步 | 当前水位: {w['water_level']:.2f}m"
+                        ], className='small mt-1'),
+                        html.Div([
+                            f"超警幅度: {w['exceedance']:.2f}m | 流量: {w['flow']:.1f}m³/s"
+                        ], className='small'),
+                    ])
+                ], style={
+                    'backgroundColor': w['bg'],
+                    'borderLeft': f'4px solid {w["color"]}',
+                    'marginBottom': '8px'
+                })
+                card_list.append(card)
+            warning_cards_display = html.Div(card_list)
+
+        decision_display = []
+        if not monitoring_state['decisions']:
+            decision_display = html.Div("暂无决策建议（出现Ⅱ级及以上预警时自动生成）",
+                style={'color': '#999', 'fontStyle': 'italic',
+                       'padding': '20px', 'textAlign': 'center'})
+        else:
+            dec_items = []
+            for dec in monitoring_state['decisions']:
+                dec_items.append(html.Div([
+                    html.Span(f"[T{dec['time_step']} {dec['timestamp']}] ",
+                              style={'color': '#666', 'fontSize': '12px'}),
+                    html.Strong(dec['content'],
+                        style={'color': '#e65100', 'fontSize': '14px'})
+                ], style={
+                    'padding': '8px 12px',
+                    'backgroundColor': '#fff3e0',
+                    'borderLeft': '3px solid #ff9800',
+                    'marginBottom': '6px',
+                    'borderRadius': '3px'
+                }))
+            decision_display = html.Div(dec_items)
+
+        deviation_display = []
+        if not monitoring_state['peak_deviations']:
+            deviation_display = html.Div("暂无偏差记录（洪峰到达后自动记录）",
+                style={'color': '#999', 'fontStyle': 'italic',
+                       'padding': '15px', 'textAlign': 'center',
+                       'backgroundColor': '#f5f5f5', 'borderRadius': '4px'})
+        else:
+            dev_rows = []
+            for d in monitoring_state['peak_deviations']:
+                dev_color = '#2e7d32' if abs(d['deviation']) <= 2 else '#c62828'
+                dev_rows.append(html.Tr([
+                    html.Td(d['station']),
+                    html.Td(f"T{d['estimated']:.1f}"),
+                    html.Td(f"T{d['actual']:.1f}"),
+                    html.Td(html.Strong(f"{d['deviation']:+.1f}步",
+                        style={'color': dev_color}))
+                ]))
+            dev_table = dbc.Table(
+                [html.Thead(html.Tr([
+                    html.Th("站点"), html.Th("预计到达"),
+                    html.Th("实际到达"), html.Th("偏差")
+                ]))] + [html.Tbody(dev_rows)],
+                bordered=True, hover=True, size='sm', responsive=True
+            )
+            deviation_display = dev_table
+
+        return tuple([
+            fig, time_step_display, warning_cards_display,
+            warning_count_text, decision_display, deviation_display,
+            export_data
+        ] + outputs_current_level + outputs_current_flow +
+            outputs_status_light + outputs_peak_arrival)

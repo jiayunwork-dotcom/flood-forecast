@@ -103,3 +103,95 @@ def create_empty_figure(title=""):
     fig.update_layout(title=title, template="plotly_white",
                       height=400, margin=dict(l=60, r=20, t=50, b=50))
     return fig
+
+
+STATION_NAMES = ['上游A', '中游B', '中游C', '下游D', '出口E']
+STATION_MILEAGES = [0, 15, 28, 42, 60]
+DEFAULT_WARNING_LEVELS = [5.0, 4.8, 5.2, 4.5, 4.0]
+DEFAULT_GUARANTEE_LEVELS = [6.5, 6.2, 6.8, 6.0, 5.5]
+STATION_COLORS = ['#e53935', '#fb8c00', '#43a047', '#1e88e5', '#8e24aa']
+AVG_FLOW_VELOCITY = 1.5
+
+monitoring_state = {
+    'running': False,
+    'time_step': 0,
+    'stations': [
+        {'name': STATION_NAMES[i], 'mileage': STATION_MILEAGES[i],
+         'warning_level': DEFAULT_WARNING_LEVELS[i],
+         'guarantee_level': DEFAULT_GUARANTEE_LEVELS[i],
+         'water_level': [], 'flow': [],
+         'current_warning_level': 0,
+         'peak_detected': False,
+         'peak_time_idx': None,
+         'estimated_peak_arrival': None,
+         'actual_peak_arrival': None}
+        for i in range(5)
+    ],
+    'warnings': [],
+    'decisions': [],
+    'peak_deviations': [],
+    'logs': []
+}
+
+
+def get_warning_level(exceedance: float) -> int:
+    if exceedance <= 0:
+        return 0
+    elif exceedance <= 0.5:
+        return 4
+    elif exceedance <= 1.5:
+        return 3
+    elif exceedance <= 3.0:
+        return 2
+    else:
+        return 1
+
+
+def get_warning_info(level: int):
+    level_map = {
+        4: {'name': 'Ⅳ级', 'color': '#1976d2', 'bg': '#e3f2fd'},
+        3: {'name': 'Ⅲ级', 'color': '#f9a825', 'bg': '#fff8e1'},
+        2: {'name': 'Ⅱ级', 'color': '#ef6c00', 'bg': '#fff3e0'},
+        1: {'name': 'Ⅰ级', 'color': '#c62828', 'bg': '#ffebee'},
+        0: {'name': '正常', 'color': '#2e7d32', 'bg': '#e8f5e9'}
+    }
+    return level_map.get(level, level_map[0])
+
+
+def generate_flood_data(t: int, station_idx: int) -> tuple:
+    base_level = 2.5
+    mileage = STATION_MILEAGES[station_idx]
+    travel_steps = calculate_travel_time_steps(0, mileage)
+    peak_center = 20 + travel_steps
+    spread = 9 + station_idx * 0.5
+    amplitude = 5.0 - station_idx * 0.2
+
+    if t < peak_center - spread:
+        flood_component = 0
+    elif t <= peak_center:
+        progress = (t - (peak_center - spread)) / spread
+        flood_component = amplitude * (np.sin(np.pi * progress / 2)) ** 1.2
+    else:
+        if t > peak_center + spread * 1.5:
+            flood_component = 0
+        else:
+            progress = (t - peak_center) / (spread * 1.5)
+            flood_component = amplitude * np.exp(-3.0 * progress) * (1 - progress * 0.3)
+
+    noise = np.random.normal(0, 0.05)
+    water_level = base_level + flood_component + noise
+    water_level = max(2.0, min(water_level, 9.0))
+
+    flow_base = 20 + station_idx * 15
+    flow_amplitude = 300 - station_idx * 25
+    flow = flow_base + (flow_amplitude * max(0, water_level - base_level) / 5.0) + np.random.normal(0, 4)
+    flow = max(10, flow)
+
+    return round(water_level, 2), round(flow, 1)
+
+
+def calculate_travel_time_steps(from_mileage: float, to_mileage: float) -> float:
+    distance_km = to_mileage - from_mileage
+    distance_m = distance_km * 1000
+    time_seconds = distance_m / AVG_FLOW_VELOCITY
+    return time_seconds / (3.0 * 3600)
